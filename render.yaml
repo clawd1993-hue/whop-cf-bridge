@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: whop-cf-bridge
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.0

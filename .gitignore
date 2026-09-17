@@ -1,0 +1,4 @@
+node_modules
+licensees.local.json
+*.log
+.DS_Store
