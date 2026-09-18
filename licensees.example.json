@@ -3,12 +3,54 @@
     "account_id": "biz_XXXXXXXXXXXX",
     "api_key": "apik_XXXXXXXXXXXX",
     "products": [
-      { "match": ["10 day challenge", "faceless funnel challenge"], "event": "purchase",          "value": 6.95 },
-      { "match": ["22 niche"],                                    "event": "bump_22_niches",    "value": 14.95 },
-      { "match": ["viral reel"],                                  "event": "bump_viral_reels",  "value": 21.95 },
-      { "match": ["dfy funnel", "done for you funnel"],           "event": "oto_dfy_funnel",    "value": 97 },
-      { "match": ["dfy product", "done for you product"],         "event": "oto_dfy_products",  "value": 47 },
-      { "match": ["downsell"],                                    "event": "downsell",          "value": 47 }
+      {
+        "match": [
+          "ff challenge",
+          "faceless funnel challenge",
+          "10 day challenge"
+        ],
+        "event": "purchase",
+        "value": 6.95
+      },
+      {
+        "match": [
+          "22 money niches",
+          "22 niche",
+          "money niches"
+        ],
+        "event": "bump_22_niches",
+        "value": 14.95
+      },
+      {
+        "match": [
+          "viral reel"
+        ],
+        "event": "bump_viral_reels",
+        "value": 21.95
+      },
+      {
+        "match": [
+          "dfy funnel",
+          "done for you funnel"
+        ],
+        "event": "oto_dfy_funnel",
+        "value": 97
+      },
+      {
+        "match": [
+          "dfy product",
+          "done for you product"
+        ],
+        "event": "oto_dfy_products",
+        "value": 47
+      },
+      {
+        "match": [
+          "downsell"
+        ],
+        "event": "downsell",
+        "value": 47
+      }
     ]
   }
 }
