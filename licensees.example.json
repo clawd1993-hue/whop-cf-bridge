@@ -30,8 +30,10 @@
       },
       {
         "match": [
-          "dfy funnel",
-          "done for you funnel"
+          "upgrade v.i.p",
+          "upgrade vip",
+          "v.i.p",
+          "dfy funnel"
         ],
         "event": "oto_dfy_funnel",
         "value": 97
