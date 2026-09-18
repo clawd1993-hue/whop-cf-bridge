@@ -49,6 +49,7 @@
       },
       {
         "match": [
+          "vip deal",
           "downsell"
         ],
         "event": "downsell",
