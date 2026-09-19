@@ -35,13 +35,22 @@ const li = (id, name, amount, qty = 1) => ({ id, quantity: qty, original_product
   r = await post('/cf/michael', { event_type: 'order.completed', data: { id: 777, subject_type: 'Order', billing_status: 'paid', contact, line_items: [li(1, 'Faceless Funnel Challenge', 6.95), li(2, '22 Niches Pack', 14.95), li(3, 'Viral Reel Pack', 21.95), li(4, 'DFY Funnel Build', 97)] } });
   check('order.completed fully deduped', r.json.events.every(e => e.action === 'dedupe_skip'));
 
+  // 4b. opt-in: contact.created -> one `lead` event, deduped on retry / contact.identified
+  r = await post('/cf/michael', { event_type: 'contact.created', subject_id: 4242, data: { id: 4242, email_address: 'lead@example.com', first_name: 'Lee', last_name: 'Ad', phone_number: '' } });
+  check('contact.created -> lead', r.status === 200 && r.json.events[0].event === 'lead' && r.json.events[0].email === 'lead@example.com');
+  check('lead has no value + event_id', r.json.events[0].body.value === undefined && r.json.events[0].body.event_id === 'cf-lead-4242');
+  r = await post('/cf/michael', { event_type: 'contact.identified', subject_id: 4242, data: { id: 4242, email_address: 'lead@example.com' } });
+  check('contact.identified deduped', r.json.events[0].action === 'dedupe_skip');
+  r = await post('/cf/michael', { event_type: 'contact.created', data: { id: 4243 } });
+  check('contact without email ignored', r.json.ignored === 'no_email');
+
   // 5. unknown product -> slug event, real amount
   r = await post('/cf/michael', { event_type: 'one-time-order.invoice.paid', data: { id: 9003, order_id: 778, status: 'paid', contact, line_items: [li(9, 'Mystery Box', 12.5)] } });
   check('unknown product -> mystery_box 12.5', r.json.events[0].event === 'mystery_box' && r.json.events[0].value === 12.5);
 
   // 6. ignored events
   r = await post('/cf/michael', { event_type: 'contact.created', data: { id: 1 } });
-  check('contact.created ignored', r.json.ignored === 'contact.created');
+  check('contact.created without email ignored', r.json.ignored === 'no_email');
   r = await post('/cf/michael', { event_type: 'one-time-order.invoice.paid', data: { id: 9004, order_id: 779, status: 'unpaid', contact, line_items: [li(1, 'Faceless Funnel Challenge', 6.95)] } });
   check('unpaid invoice ignored', r.json.ignored_status === 'unpaid');
   r = await post('/cf/nobody', { event_type: 'order.completed', data: {} });

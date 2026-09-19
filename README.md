@@ -23,6 +23,7 @@ Event names must match the Whop custom-metric formulas: `purchase`, `bump_22_nic
 - Only acts on paid invoices / completed orders. Everything else → 200 ignored.
 - Dedupe: in-memory (7 days) + Whop `event_id = cf-<orderId>-<variantId>` so CF retries and order.completed re-fires never double count.
 - Whop 5xx / network error → responds 500 so CF retries (1s → 24h schedule). Whop 4xx → logged, 200 (retry won't help).
+- **Opt-in tracking:** add CF events `contact.created` + `contact.identified` to the webhook → bridge sends one Whop `lead` event per contact (no value, `event_id cf-lead-<contactId>`, deduped). Override the name per licensee with `"lead_event": "optin"` in LICENSEES.
 - `GET /health`, `GET /admin/recent?token=…` (last 200 deliveries), `POST /admin/reload?token=…`.
 
 ## Local test

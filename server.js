@@ -41,6 +41,8 @@ const PAID_EVENTS = new Set([
   'one-time-order.completed',
   'order.completed',
 ]);
+// CF contact events -> one Whop `lead` event (opt-in tracking, no value)
+const LEAD_EVENTS = new Set(['contact.created', 'contact.identified']);
 
 // Pick the product mapping rule for a line item.
 // Rule shape: { match: "22 niches" | ["22 niches","niches"], product_id?: 123, event: "bump_22_niches", value?: 14.95 }
@@ -119,6 +121,25 @@ function buildEvents(licensee, body) {
   return out;
 }
 
+function buildLeadEvent(licensee, body) {
+  const data = body.data || {};
+  const contact = extractContact(data);
+  if (!contact.email) return null;
+  const cid = data.id || body.subject_id || contact.external_id || slugify(contact.email);
+  const key = `lead-${cid}`;
+  return {
+    dedupe_key: `${licensee.account_id}:${key}`,
+    whop: {
+      account_id: licensee.account_id,
+      event_name: licensee.lead_event || 'lead',
+      event_id: `cf-${key}`,
+      action_source: 'website',
+      user: { email: contact.email, first_name: contact.first_name, last_name: contact.last_name, phone: contact.phone, external_id: contact.external_id },
+    },
+    meta: { contact_id: cid, cf_event: body.event_type },
+  };
+}
+
 // ---------- dedupe (in-memory; Whop event_id is the durable guard) ----------
 const seen = new Map(); // key -> ts
 const SEEN_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -155,6 +176,23 @@ app.post('/cf/:slug', async (req, res) => {
   if (!licensee) return res.status(404).json({ error: 'unknown licensee' });
   const body = req.body || {};
   const eventType = body.event_type || '';
+
+  if (LEAD_EVENTS.has(eventType)) {
+    const ev = buildLeadEvent(licensee, body);
+    if (!ev) { logEvent({ slug: req.params.slug, cf_event: eventType, action: 'no_email' }); return res.status(200).json({ ok: true, ignored: 'no_email' }); }
+    if (alreadySent(ev.dedupe_key)) { logEvent({ slug: req.params.slug, cf_event: eventType, action: 'dedupe_skip', contact_id: ev.meta.contact_id }); return res.status(200).json({ ok: true, events: [{ ...ev.meta, event: ev.whop.event_name, action: 'dedupe_skip' }] }); }
+    try {
+      const r = await postToWhop(licensee.api_key, ev.whop);
+      const ok = r.status >= 200 && r.status < 300;
+      if (ok) markSent(ev.dedupe_key);
+      const out = { ...ev.meta, event: ev.whop.event_name, email: ev.whop.user.email, whop_status: r.status, whop_resp: r.text.slice(0, 300), body: DRY_RUN ? ev.whop : undefined };
+      logEvent({ slug: req.params.slug, cf_event: eventType, contact_id: ev.meta.contact_id, sent: [out] });
+      return res.status(r.status >= 500 ? 500 : 200).json({ ok: r.status < 500, events: [out] });
+    } catch (e) {
+      logEvent({ slug: req.params.slug, cf_event: eventType, error: String(e.message || e) });
+      return res.status(500).json({ ok: false, error: String(e.message || e) });
+    }
+  }
 
   if (!PAID_EVENTS.has(eventType)) {
     logEvent({ slug: req.params.slug, cf_event: eventType, action: 'ignored' });
