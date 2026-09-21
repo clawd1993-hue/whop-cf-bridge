@@ -1,0 +1,41 @@
+<!-- Whop attribution helper for ClickFunnels 2.0 — paste BELOW the Whop pixel in Funnel Settings → Custom Code → Head Code.
+     1) fills any form input whose Custom Type name contains "whop_visitor_id" with the Whop _wuid cookie (and hides it)
+     2) on submit, tells the Whop pixel who this visitor is (custom event `optin_form` with the email) so the browser
+        session gets linked to the person the server events (lead/purchase) are sent for. -->
+<script>
+(function(){
+  function wuid(){
+    var m=document.cookie.match(/(?:^|;\s*)_wuid=([^;]*)/);
+    if(m) return decodeURIComponent(m[1]);
+    try{ return localStorage.getItem('_wuid')||''; }catch(e){ return ''; }
+  }
+  function fields(){
+    return Array.prototype.slice.call(document.querySelectorAll('input')).filter(function(i){
+      var s=((i.name||'')+' '+(i.id||'')+' '+(i.placeholder||'')+' '+(i.getAttribute('data-custom-type')||'')).toLowerCase();
+      return s.indexOf('whop_visitor_id')>-1;
+    });
+  }
+  function fill(){
+    var id=wuid(); var fs=fields();
+    fs.forEach(function(f){
+      var wrap=f.closest('[data-element-type],[class*="elInput"],[class*="input"]')||f.parentElement;
+      if(wrap) wrap.style.display='none';
+      if(!id||f.value===id) return;
+      var set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+      set.call(f,id);
+      f.dispatchEvent(new Event('input',{bubbles:true}));
+      f.dispatchEvent(new Event('change',{bubbles:true}));
+    });
+    return !!(id&&fs.length);
+  }
+  var n=0,t=setInterval(function(){ if(fill()||++n>120) clearInterval(t); },500);
+  document.addEventListener('click',function(){ setTimeout(fill,50); },true);
+  document.addEventListener('submit',function(e){
+    fill();
+    try{
+      var em=(e.target&&e.target.querySelector)?e.target.querySelector('input[type="email"],input[name*="email" i]'):null;
+      if(window.whop&&em&&em.value) whop.track('optin_form',{email:em.value});
+    }catch(_){}
+  },true);
+})();
+</script>

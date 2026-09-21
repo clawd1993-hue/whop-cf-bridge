@@ -84,12 +84,54 @@ function extractContact(data) {
   };
 }
 
+// ---------- attribution (Whop needs anonymous_id + landing URL to credit an ad) ----------
+// CF contact payloads carry `visits` (first_visit / last_visit / last_visit_with_utm: landing_page, ip,
+// user_agent, utm_*) and `custom_attributes` (hidden form field `whop_visitor_id` = Whop _wuid cookie).
+// We remember what we saw on contact events so later order events (which may carry less) still get it.
+const attrCache = new Map(); // contact_id -> { anonymous_id, url, ip, ua, utm, ts }
+const ATTR_TTL_MS = 28 * 24 * 3600 * 1000;
+function cacheAttr(id, a) { if (!id || !a) return; attrCache.set(String(id), { ...a, ts: Date.now() }); if (attrCache.size > 50000) attrCache.delete(attrCache.keys().next().value); }
+function cachedAttr(id) { const a = attrCache.get(String(id || '')); if (!a) return null; if (Date.now() - a.ts > ATTR_TTL_MS) { attrCache.delete(String(id)); return null; } return a; }
+function qs(url, key) { try { return new URL(url).searchParams.get(key) || ''; } catch { return ''; } }
+function extractAttribution(data) {
+  const c = data.contact || data.order?.contact || data;
+  const ca = c.custom_attributes || data.custom_attributes || {};
+  const v = c.visits || data.visits || {};
+  const visit = v.last_visit_with_utm || v.first_visit || v.last_visit || null;
+  const a = {
+    anonymous_id: String(ca.whop_visitor_id || ca.whop_wuid || '').trim(),
+    url: String(ca.whop_page_url || visit?.landing_page || '').trim(),
+    ip: visit?.ip || '',
+    ua: visit?.user_agent || '',
+    utm: visit ? { utm_source: visit.utm_source, utm_medium: visit.utm_medium, utm_campaign: visit.utm_campaign, utm_term: visit.utm_term, utm_content: visit.utm_content } : {},
+  };
+  if (a.anonymous_id && !/^wuid_/.test(a.anonymous_id)) a.anonymous_id = '';
+  const id = c.id || data.contact_id;
+  const prev = cachedAttr(id);
+  const merged = prev ? { anonymous_id: a.anonymous_id || prev.anonymous_id, url: a.url || prev.url, ip: a.ip || prev.ip, ua: a.ua || prev.ua, utm: Object.keys(a.utm).some(k => a.utm[k]) ? a.utm : prev.utm } : a;
+  if (merged.anonymous_id || merged.url) cacheAttr(id, merged);
+  return merged;
+}
+function applyAttribution(whop, a) {
+  if (!a) return whop;
+  if (a.anonymous_id) whop.user.anonymous_id = a.anonymous_id;
+  if (a.url) whop.url = a.url;
+  const ctx = {};
+  if (a.ip) ctx.ip_address = a.ip;
+  if (a.ua) ctx.user_agent = a.ua;
+  for (const k of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']) if (a.utm?.[k]) ctx[k] = a.utm[k];
+  const fbclid = qs(a.url, 'fbclid'); if (fbclid) ctx.fbclid = fbclid;
+  if (Object.keys(ctx).length) whop.context = ctx;
+  return whop;
+}
+
 // Turn a CF webhook body into a list of Whop event bodies
 function buildEvents(licensee, body) {
   const data = body.data || {};
   const orderId = data.order_id || (data.subject_type === 'Order' ? data.id : null) || data.order?.id || data.id;
   const items = (data.line_items || []).map(normaliseItem);
   const contact = extractContact(data);
+  const attr = extractAttribution(data);
   const out = [];
   for (const it of items) {
     const rule = findRule(licensee, it);
@@ -115,8 +157,9 @@ function buildEvents(licensee, body) {
           external_id: contact.external_id,
         },
       },
-      meta: { order_id: orderId, product: it.name, cf_event: body.event_type },
+      meta: { order_id: orderId, product: it.name, cf_event: body.event_type, attributed: !!(attr.anonymous_id || attr.url) },
     });
+    applyAttribution(out[out.length - 1].whop, attr);
   }
   return out;
 }
@@ -126,8 +169,9 @@ function buildLeadEvent(licensee, body) {
   const contact = extractContact(data);
   if (!contact.email) return null;
   const cid = data.id || body.subject_id || contact.external_id || slugify(contact.email);
+  const attr = extractAttribution({ ...data, contact_id: cid });
   const key = `lead-${cid}`;
-  return {
+  const ev = {
     dedupe_key: `${licensee.account_id}:${key}`,
     whop: {
       account_id: licensee.account_id,
@@ -136,8 +180,10 @@ function buildLeadEvent(licensee, body) {
       action_source: 'website',
       user: { email: contact.email, first_name: contact.first_name, last_name: contact.last_name, phone: contact.phone, external_id: contact.external_id },
     },
-    meta: { contact_id: cid, cf_event: body.event_type },
+    meta: { contact_id: cid, cf_event: body.event_type, attributed: !!(attr.anonymous_id || attr.url) },
   };
+  applyAttribution(ev.whop, attr);
+  return ev;
 }
 
 // ---------- dedupe (in-memory; Whop event_id is the durable guard) ----------
@@ -171,11 +217,13 @@ app.use(express.json({ limit: '2mb' }));
 
 app.get('/health', (req, res) => res.json({ ok: true, licensees: Object.keys(LICENSEES).length, dry_run: DRY_RUN }));
 
+const rawRecent = [];
 app.post('/cf/:slug', async (req, res) => {
   const licensee = LICENSEES[req.params.slug];
   if (!licensee) return res.status(404).json({ error: 'unknown licensee' });
   const body = req.body || {};
   const eventType = body.event_type || '';
+  rawRecent.unshift({ ts: new Date().toISOString(), slug: req.params.slug, event_type: eventType, data: body.data }); if (rawRecent.length > 30) rawRecent.pop();
 
   if (LEAD_EVENTS.has(eventType)) {
     const ev = buildLeadEvent(licensee, body);
@@ -229,6 +277,10 @@ app.post('/cf/:slug', async (req, res) => {
 app.get('/admin/recent', (req, res) => {
   if (!ADMIN_TOKEN || req.query.token !== ADMIN_TOKEN) return res.status(403).end();
   res.json(recent);
+});
+app.get('/admin/raw', (req, res) => {
+  if (!ADMIN_TOKEN || req.query.token !== ADMIN_TOKEN) return res.status(403).end();
+  res.json(rawRecent);
 });
 app.post('/admin/reload', (req, res) => {
   if (!ADMIN_TOKEN || req.query.token !== ADMIN_TOKEN) return res.status(403).end();

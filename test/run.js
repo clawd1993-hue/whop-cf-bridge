@@ -44,6 +44,23 @@ const li = (id, name, amount, qty = 1) => ({ id, quantity: qty, original_product
   r = await post('/cf/michael', { event_type: 'contact.created', data: { id: 4243 } });
   check('contact without email ignored', r.json.ignored === 'no_email');
 
+  // 4c. attribution: contact.created with visits + hidden whop_visitor_id -> lead carries anonymous_id/url/context;
+  //     a later order for the same contact (no visits in payload) reuses the cached attribution
+  const visits = { first_visit: { landing_page: 'https://go.example.com/free-case-study?utm_source=ig&wacid=adcamp_1&wasid=adgrp_1&waid=ad_1&fbclid=IwAR0x', ip: '203.0.113.9', user_agent: 'UA/1.0', utm_source: 'ig', utm_medium: 'paid_social', utm_campaign: null, utm_term: null, utm_content: 'reel A' }, last_visit: null, last_visit_with_utm: null };
+  r = await post('/cf/michael', { event_type: 'contact.created', subject_id: 5151, data: { id: 5151, email_address: 'attr@example.com', first_name: 'At', last_name: 'Tr', custom_attributes: { whop_visitor_id: 'wuid_abc123' }, visits } });
+  let b = r.json.events[0].body;
+  check('lead carries anonymous_id', b.user.anonymous_id === 'wuid_abc123');
+  check('lead carries landing url', b.url === visits.first_visit.landing_page);
+  check('lead context ip/ua/utm/fbclid', b.context.ip_address === '203.0.113.9' && b.context.user_agent === 'UA/1.0' && b.context.utm_source === 'ig' && b.context.fbclid === 'IwAR0x' && b.context.utm_campaign === undefined);
+  r = await post('/cf/michael', { event_type: 'one-time-order.invoice.paid', data: { id: 9010, order_id: 790, status: 'paid', contact: { id: 5151, email_address: 'attr@example.com', first_name: 'At' }, line_items: [li(1, 'Faceless Funnel Challenge', 6.95)] } });
+  b = r.json.events[0].body;
+  check('purchase reuses cached anonymous_id + url', b.user.anonymous_id === 'wuid_abc123' && b.url === visits.first_visit.landing_page && r.json.events[0].attributed === true);
+  r = await post('/cf/michael', { event_type: 'one-time-order.invoice.paid', data: { id: 9011, order_id: 791, status: 'paid', contact: { id: 5252, email_address: 'noattr@example.com' }, line_items: [li(1, 'Faceless Funnel Challenge', 6.95)] } });
+  b = r.json.events[0].body;
+  check('no attribution -> no url/anonymous_id/context keys', b.url === undefined && b.user.anonymous_id === undefined && b.context === undefined && r.json.events[0].attributed === false);
+  r = await post('/cf/michael', { event_type: 'contact.created', subject_id: 5353, data: { id: 5353, email_address: 'bad@example.com', custom_attributes: { whop_visitor_id: 'not-a-wuid' } } });
+  check('junk visitor id dropped', r.json.events[0].body.user.anonymous_id === undefined);
+
   // 5. unknown product -> slug event, real amount
   r = await post('/cf/michael', { event_type: 'one-time-order.invoice.paid', data: { id: 9003, order_id: 778, status: 'paid', contact, line_items: [li(9, 'Mystery Box', 12.5)] } });
   check('unknown product -> mystery_box 12.5', r.json.events[0].event === 'mystery_box' && r.json.events[0].value === 12.5);
