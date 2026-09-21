@@ -278,6 +278,31 @@ app.get('/admin/recent', (req, res) => {
   if (!ADMIN_TOKEN || req.query.token !== ADMIN_TOKEN) return res.status(403).end();
   res.json(recent);
 });
+// ---------- unsubscribe (nurture emails) ----------
+// GET /unsub?e=<email> -> forwards to a Zapier catch hook (env UNSUB_HOOK_URL) which adds the email to the
+// "FFC Buyer Log Table"; the nurture zap's existing Find+Filter then stops every further email. Shows a plain page.
+const UNSUB_HOOK_URL = process.env.UNSUB_HOOK_URL || '';
+const unsubRecent = [];
+app.get('/unsub', async (req, res) => {
+  const email = String(req.query.e || req.query.email || '').trim().toLowerCase();
+  const ok = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
+  let forwarded = false;
+  if (ok && UNSUB_HOOK_URL) {
+    try { const r = await fetch(UNSUB_HOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, source: 'nurture-unsub', ts: new Date().toISOString() }) }); forwarded = r.ok; } catch {}
+  }
+  unsubRecent.unshift({ ts: new Date().toISOString(), email: ok ? email : null, forwarded }); if (unsubRecent.length > 200) unsubRecent.pop();
+  console.log(JSON.stringify({ unsub: email, forwarded }));
+  res.set('Content-Type', 'text/html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribed</title></head>
+<body style="margin:0;background:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><div style="max-width:520px;margin:60px auto;background:#fff;border-radius:10px;padding:36px 32px;color:#1f2937;">
+<h2 style="margin:0 0 12px;">${ok ? "You're unsubscribed" : 'Something went wrong'}</h2>
+<p style="line-height:1.6;margin:0;">${ok ? `<strong>${email.replace(/[<>&]/g,'')}</strong> won't get any more emails from this sequence.` : 'That unsubscribe link is missing an email address. Reply to the email with STOP and we will remove you.'}</p>
+</div></body></html>`);
+});
+app.get('/admin/unsubs', (req, res) => {
+  if (!ADMIN_TOKEN || req.query.token !== ADMIN_TOKEN) return res.status(403).end();
+  res.json(unsubRecent);
+});
+
 app.get('/admin/raw', (req, res) => {
   if (!ADMIN_TOKEN || req.query.token !== ADMIN_TOKEN) return res.status(403).end();
   res.json(rawRecent);
