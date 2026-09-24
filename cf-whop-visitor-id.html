@@ -1,7 +1,9 @@
 <!-- Whop attribution helper for ClickFunnels 2.0 — paste BELOW the Whop pixel in Funnel Settings → Custom Code → Head Code.
      1) fills any form input whose Custom Type name contains "whop_visitor_id" with the Whop _wuid cookie (and hides it)
      2) on submit, tells the Whop pixel who this visitor is (custom event `optin_form` with the email) so the browser
-        session gets linked to the person the server events (lead/purchase) are sent for. -->
+        session gets linked to the person the server events (lead/purchase) are sent for.
+     3) if the page URL has ?e=<email> (nurture email links), fires `email_click` with that email on load so a new
+        device/cookie is merged into the original (ad-attributed) person before they buy with any email. -->
 <script>
 (function(){
   function wuid(){
@@ -28,6 +30,17 @@
     });
     return !!(id&&fs.length);
   }
+  // 3) email links: if the URL carries ?e=<email> (from the nurture emails), tell Whop who this visitor is
+  //    right away so a new device / new cookie gets stitched onto the person who clicked the ad.
+  try{
+    var qe=new URLSearchParams(location.search).get('e')||'';
+    qe=decodeURIComponent(qe).trim().toLowerCase();
+    if(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(qe)){
+      try{ localStorage.setItem('_ffc_email',qe); }catch(_){}
+      var fire=function(){ if(window.whop){ whop.track('email_click',{email:qe,event_id:'ec-'+qe+'-'+new Date().toISOString().slice(0,13)}); return true; } return false; };
+      if(!fire()){ var k=0,ft=setInterval(function(){ if(fire()||++k>40) clearInterval(ft); },250); }
+    }
+  }catch(_){}
   var n=0,t=setInterval(function(){ if(fill()||++n>120) clearInterval(t); },500);
   document.addEventListener('click',function(){ setTimeout(fill,50); },true);
   document.addEventListener('submit',function(e){
