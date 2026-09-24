@@ -3,7 +3,9 @@
      2) on submit, tells the Whop pixel who this visitor is (custom event `optin_form` with the email) so the browser
         session gets linked to the person the server events (lead/purchase) are sent for.
      3) if the page URL has ?e=<email> (nurture email links), fires `email_click` with that email on load so a new
-        device/cookie is merged into the original (ad-attributed) person before they buy with any email. -->
+        device/cookie is merged into the original (ad-attributed) person before they buy with any email.
+     4) giveaway: ?ref=CODE on the landing URL is kept in localStorage and written into any form input whose
+        Custom Type name contains "giveaway_ref" (opt-in + checkout) so the CF webhook carries the referrer. -->
 <script>
 (function(){
   function wuid(){
@@ -11,24 +13,34 @@
     if(m) return decodeURIComponent(m[1]);
     try{ return localStorage.getItem('_wuid')||''; }catch(e){ return ''; }
   }
-  function fields(){
+  // giveaway referral code: ?ref=CODE on the landing URL -> kept in localStorage for the whole funnel
+  function gref(){
+    try{
+      var q=new URLSearchParams(location.search).get('ref')||'';
+      q=q.trim().toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12);
+      if(q){ localStorage.setItem('_gw_ref',q); return q; }
+      return localStorage.getItem('_gw_ref')||'';
+    }catch(e){ return ''; }
+  }
+  function fields(key){
     return Array.prototype.slice.call(document.querySelectorAll('input')).filter(function(i){
       var s=((i.name||'')+' '+(i.id||'')+' '+(i.placeholder||'')+' '+(i.getAttribute('data-custom-type')||'')).toLowerCase();
-      return s.indexOf('whop_visitor_id')>-1;
+      return s.indexOf(key)>-1;
     });
   }
+  function setVal(f,v){
+    var wrap=f.closest('[data-element-type],[class*="elInput"],[class*="input"]')||f.parentElement;
+    if(wrap) wrap.style.display='none';
+    if(!v||f.value===v) return;
+    var set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+    set.call(f,v);
+    f.dispatchEvent(new Event('input',{bubbles:true}));
+    f.dispatchEvent(new Event('change',{bubbles:true}));
+  }
   function fill(){
-    var id=wuid(); var fs=fields();
-    fs.forEach(function(f){
-      var wrap=f.closest('[data-element-type],[class*="elInput"],[class*="input"]')||f.parentElement;
-      if(wrap) wrap.style.display='none';
-      if(!id||f.value===id) return;
-      var set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
-      set.call(f,id);
-      f.dispatchEvent(new Event('input',{bubbles:true}));
-      f.dispatchEvent(new Event('change',{bubbles:true}));
-    });
-    return !!(id&&fs.length);
+    var id=wuid(); var fs=fields('whop_visitor_id'); fs.forEach(function(f){ setVal(f,id); });
+    var rc=gref(); var gs=fields('giveaway_ref'); gs.forEach(function(f){ setVal(f,rc); });
+    return !!(id&&fs.length)&&(!gs.length||!!rc);
   }
   // 3) email links: if the URL carries ?e=<email> (from the nurture emails), tell Whop who this visitor is
   //    right away so a new device / new cookie gets stitched onto the person who clicked the ad.

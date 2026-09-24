@@ -196,6 +196,26 @@ function alreadySent(key) {
 }
 function markSent(key) { seen.set(key, Date.now()); if (seen.size > 50000) { const k = seen.keys().next().value; seen.delete(k); } }
 
+// ---------- giveaway forwarder (ffc-giveaway) ----------
+// Forwards lead + purchase events to the Creator Gear Giveaway app so referrals get credited.
+// Payload: {type, email, first_name, last_name, ref (CF custom attribute giveaway_ref), order_id, product, value, event}
+const GIVEAWAY_HOOK_URL = process.env.GIVEAWAY_HOOK_URL || '';
+const GIVEAWAY_HOOK_SECRET = process.env.GIVEAWAY_HOOK_SECRET || '';
+const GIVEAWAY_SLUG = process.env.GIVEAWAY_SLUG || 'michael';
+function giveawayRef(data) {
+  const c = data.contact || data.order?.contact || data;
+  const ca = c.custom_attributes || data.custom_attributes || {};
+  return String(ca.giveaway_ref || ca.gw_ref || ca.ref || '').trim().toUpperCase().slice(0, 12);
+}
+async function forwardToGiveaway(payload) {
+  if (!GIVEAWAY_HOOK_URL) return null;
+  try {
+    const r = await fetch(GIVEAWAY_HOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-hook-secret': GIVEAWAY_HOOK_SECRET }, body: JSON.stringify(payload) });
+    const j = await r.json().catch(() => ({}));
+    return { status: r.status, ...j };
+  } catch (e) { return { error: String(e.message || e) }; }
+}
+
 // ---------- recent log for debugging ----------
 const recent = [];
 function logEvent(entry) { recent.unshift({ ts: new Date().toISOString(), ...entry }); if (recent.length > 200) recent.pop(); console.log(JSON.stringify(entry)); }
@@ -234,6 +254,7 @@ app.post('/cf/:slug', async (req, res) => {
       const ok = r.status >= 200 && r.status < 300;
       if (ok) markSent(ev.dedupe_key);
       const out = { ...ev.meta, event: ev.whop.event_name, email: ev.whop.user.email, whop_status: r.status, whop_resp: r.text.slice(0, 300), body: DRY_RUN ? ev.whop : undefined };
+      if (req.params.slug === GIVEAWAY_SLUG) forwardToGiveaway({ type: 'lead', email: ev.whop.user.email, first_name: ev.whop.user.first_name, last_name: ev.whop.user.last_name, ref: giveawayRef(body.data || {}), cf_event: eventType }).then(g => { if (g) logEvent({ slug: req.params.slug, giveaway: g, email: ev.whop.user.email, type: 'lead' }); });
       logEvent({ slug: req.params.slug, cf_event: eventType, contact_id: ev.meta.contact_id, sent: [out] });
       return res.status(r.status >= 500 ? 500 : 200).json({ ok: r.status < 500, events: [out] });
     } catch (e) {
@@ -270,6 +291,7 @@ app.post('/cf/:slug', async (req, res) => {
     }
   }
   logEvent({ slug: req.params.slug, cf_event: eventType, order_id: events[0]?.meta.order_id, sent: results });
+  if (req.params.slug === GIVEAWAY_SLUG) for (const ev of events) forwardToGiveaway({ type: 'purchase', event: ev.whop.event_name, email: ev.whop.user.email, first_name: ev.whop.user.first_name, last_name: ev.whop.user.last_name, ref: giveawayRef(body.data || {}), order_id: ev.meta.order_id, product: ev.meta.product, value: ev.whop.value, cf_event: eventType }).then(g => { if (g) logEvent({ slug: req.params.slug, giveaway: g, email: ev.whop.user.email, type: 'purchase', order_id: ev.meta.order_id }); });
   // 500 makes ClickFunnels retry (1s,15s,1m,5m,15m,1h,12h,24h); 200 = done
   res.status(retryable ? 500 : 200).json({ ok: !retryable, events: results });
 });
