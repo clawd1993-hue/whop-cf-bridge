@@ -205,7 +205,16 @@ const GIVEAWAY_SLUG = process.env.GIVEAWAY_SLUG || 'michael';
 function giveawayRef(data) {
   const c = data.contact || data.order?.contact || data;
   const ca = c.custom_attributes || data.custom_attributes || {};
-  return String(ca.giveaway_ref || ca.gw_ref || ca.ref || '').trim().toUpperCase().slice(0, 12);
+  let ref = String(ca.giveaway_ref || ca.gw_ref || ca.ref || '').trim();
+  if (!ref) {
+    // fallback: the share link lands the friend on the case-study page with ?ref=CODE; CF records that landing URL per contact
+    const v = c.visits || data.visits || {};
+    for (const visit of [v.last_visit_with_utm, v.first_visit, v.last_visit]) {
+      const r = visit?.landing_page ? qs(visit.landing_page, 'ref') : '';
+      if (r) { ref = r; break; }
+    }
+  }
+  return ref.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
 }
 async function forwardToGiveaway(payload) {
   if (!GIVEAWAY_HOOK_URL) return null;
