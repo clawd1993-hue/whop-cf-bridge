@@ -14,6 +14,8 @@ const WHOP_EVENTS_URL = process.env.WHOP_EVENTS_URL || 'https://api.whop.com/api
 const DRY_RUN = process.env.DRY_RUN === '1';
 const PORT = process.env.PORT || 3900;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 
 // ---------- licensee config ----------
 function loadLicensees() {
@@ -240,6 +242,32 @@ async function postToWhop(apiKey, whopBody) {
   return { status: res.status, text };
 }
 
+// ---------- supabase (our own clean CF sales/lead ledger) ----------
+// Fire-and-forget: never blocks the Whop response or CF retry logic. Dedupe_key unique -> CF retries never double-insert.
+function saveToSupabase(rows) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !rows.length) return;
+  fetch(`${SUPABASE_URL}/rest/v1/cf_events`, {
+    method: 'POST',
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'resolution=ignore-duplicates,return=minimal',
+    },
+    body: JSON.stringify(rows),
+  }).then(async r => { if (!r.ok) console.log(JSON.stringify({ supabase_error: r.status, text: (await r.text()).slice(0, 200) })); })
+    .catch(e => console.log(JSON.stringify({ supabase_error: String(e.message || e) })));
+}
+const sbRow = (slug, kind, ev, eventType) => ({
+  funnel: slug, kind, event_type: eventType,
+  order_id: ev.meta.order_id || null, contact_id: ev.meta.contact_id || null,
+  email: ev.whop?.user?.email || null, product: ev.meta.product || null,
+  event_name: ev.whop?.event_name || null,
+  value: (ev.whop && ev.whop.value != null) ? ev.whop.value : null,
+  currency: ev.whop?.currency || null, attributed: !!ev.meta.attributed,
+  dedupe_key: ev.dedupe_key || null,
+});
+
 // ---------- app ----------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -257,6 +285,7 @@ app.post('/cf/:slug', async (req, res) => {
   if (LEAD_EVENTS.has(eventType)) {
     const ev = buildLeadEvent(licensee, body);
     if (!ev) { logEvent({ slug: req.params.slug, cf_event: eventType, action: 'no_email' }); return res.status(200).json({ ok: true, ignored: 'no_email' }); }
+    saveToSupabase([sbRow(req.params.slug, 'lead', ev, eventType)]);
     if (alreadySent(ev.dedupe_key)) { logEvent({ slug: req.params.slug, cf_event: eventType, action: 'dedupe_skip', contact_id: ev.meta.contact_id }); return res.status(200).json({ ok: true, events: [{ ...ev.meta, event: ev.whop.event_name, action: 'dedupe_skip' }] }); }
     try {
       const r = await postToWhop(licensee.api_key, ev.whop);
@@ -284,6 +313,7 @@ app.post('/cf/:slug', async (req, res) => {
   }
 
   const events = buildEvents(licensee, body);
+  saveToSupabase(events.map(ev => sbRow(req.params.slug, 'purchase', ev, eventType)));
   const results = [];
   let retryable = false;
   for (const ev of events) {
