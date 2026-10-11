@@ -11,6 +11,8 @@ const express = require('express');
 const crypto = require('crypto');
 
 const WHOP_EVENTS_URL = process.env.WHOP_EVENTS_URL || 'https://api.whop.com/api/v1/events';
+const TIKTOK_EVENTS_URL = process.env.TIKTOK_EVENTS_URL || 'https://business-api.tiktok.com/open_api/v1.3/event/track/';
+const TIKTOK_TEST_CODE = process.env.TIKTOK_TEST_CODE || '';
 const DRY_RUN = process.env.DRY_RUN === '1';
 const PORT = process.env.PORT || 3900;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
@@ -268,6 +270,64 @@ const sbRow = (slug, kind, ev, eventType) => ({
   dedupe_key: ev.dedupe_key || null,
 });
 
+// ---------- TikTok Events API (server-side CompletePayment, like Meta CAPI) ----------
+// Enabled per-licensee via config: licensee.tiktok = { pixel_id, access_token, event? }.
+// Fires one CompletePayment per paid order with the FULL order value + SHA-256-hashed email/phone.
+// Fire-and-forget: never affects the Whop post or CF retry status.
+const sha256 = v => { const s = String(v == null ? '' : v).trim().toLowerCase(); return s ? crypto.createHash('sha256').update(s).digest('hex') : undefined; };
+const sha256phone = v => { let s = String(v == null ? '' : v).replace(/[^\d+]/g, ''); if (!s) return undefined; if (!s.startsWith('+')) s = '+' + s; return crypto.createHash('sha256').update(s).digest('hex'); };
+
+function buildTikTokEvent(licensee, body, events) {
+  const tt = licensee.tiktok; if (!tt || !tt.pixel_id || !tt.access_token) return null;
+  const data = body.data || {};
+  const orderId = data.order_id || (data.subject_type === 'Order' ? data.id : null) || data.order?.id || data.id;
+  const contact = extractContact(data);
+  const attr = extractAttribution({ ...data, contact_id: data.id || data.contact_id });
+  const value = events.reduce((s, ev) => s + num(ev.whop.value), 0);
+  if (!(value > 0)) return null;
+  const currency = (events[0]?.whop.currency || 'usd').toUpperCase();
+  const contents = events.map(ev => ({ content_id: ev.meta.product ? slugify(ev.meta.product) : (ev.whop.event_name || 'product'), content_type: 'product', content_name: ev.meta.product || ev.whop.event_name }));
+  const user = {};
+  const em = sha256(contact.email); if (em) user.email = em;
+  const ph = sha256phone(contact.phone); if (ph) user.phone = ph;
+  const ext = sha256(contact.external_id); if (ext) user.external_id = ext;
+  if (attr.ip) user.ip = attr.ip;
+  if (attr.ua) user.user_agent = attr.ua;
+  const ttclid = qs(attr.url, 'ttclid'); if (ttclid) user.ttclid = ttclid;
+  const ca = (data.contact?.custom_attributes || data.custom_attributes || {});
+  const ttp = ca.ttp || ca.tiktok_ttp || ca._ttp; if (ttp) user.ttp = String(ttp);
+  const ev = {
+    event: tt.event || 'CompletePayment',
+    event_time: Math.floor(Date.now() / 1000),
+    event_id: `cf-tt-${orderId}`,
+    user,
+    properties: { currency, value: Math.round(value * 100) / 100, contents },
+  };
+  if (attr.url) ev.page = { url: attr.url };
+  return { pixel_id: tt.pixel_id, access_token: tt.access_token, event: ev, dedupe_key: `tt:${tt.pixel_id}:${orderId}`, meta: { order_id: orderId, value, email: contact.email } };
+}
+
+async function postToTikTok(pkg) {
+  if (DRY_RUN) return { status: 200, text: 'DRY_RUN', dry: true };
+  const payload = { event_source: 'web', event_source_id: pkg.pixel_id, data: [pkg.event] };
+  if (TIKTOK_TEST_CODE) payload.test_event_code = TIKTOK_TEST_CODE;
+  const res = await fetch(TIKTOK_EVENTS_URL, { method: 'POST', headers: { 'Access-Token': pkg.access_token, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const text = await res.text();
+  return { status: res.status, text };
+}
+
+function fireTikTok(slug, licensee, body, events) {
+  if (!licensee.tiktok) return;
+  const pkg = buildTikTokEvent(licensee, body, events);
+  if (!pkg || alreadySent(pkg.dedupe_key)) return;
+  postToTikTok(pkg).then(r => {
+    // TikTok returns 200 with a JSON body; code:0 = success, code!=0 = rejected
+    let code = null; try { code = JSON.parse(r.text).code; } catch {}
+    if (r.status >= 200 && r.status < 300 && (code === 0 || code == null)) markSent(pkg.dedupe_key);
+    logEvent({ slug, tiktok: { status: r.status, code, resp: String(r.text).slice(0, 300), order_id: pkg.meta.order_id, value: pkg.meta.value, email: pkg.meta.email } });
+  }).catch(e => logEvent({ slug, tiktok_error: String(e.message || e) }));
+}
+
 // ---------- app ----------
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -331,6 +391,7 @@ app.post('/cf/:slug', async (req, res) => {
   }
   logEvent({ slug: req.params.slug, cf_event: eventType, order_id: events[0]?.meta.order_id, sent: results });
   if (req.params.slug === GIVEAWAY_SLUG) for (const ev of events) forwardToGiveaway({ type: 'purchase', event: ev.whop.event_name, email: ev.whop.user.email, first_name: ev.whop.user.first_name, last_name: ev.whop.user.last_name, ref: giveawayRef(body.data || {}), order_id: ev.meta.order_id, product: ev.meta.product, value: ev.whop.value, cf_event: eventType }).then(g => { if (g) logEvent({ slug: req.params.slug, giveaway: g, email: ev.whop.user.email, type: 'purchase', order_id: ev.meta.order_id }); });
+  fireTikTok(req.params.slug, licensee, body, events); // server-side CompletePayment, fire-and-forget
   // 500 makes ClickFunnels retry (1s,15s,1m,5m,15m,1h,12h,24h); 200 = done
   res.status(retryable ? 500 : 200).json({ ok: !retryable, events: results });
 });
